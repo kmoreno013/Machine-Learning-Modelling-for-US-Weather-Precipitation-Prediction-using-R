@@ -1,0 +1,492 @@
+---
+title: "ML Modelling for US Weather Prediction"
+author: "Kendrick Moreno"
+date: "`r Sys.Date()`"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r definelib, include=FALSE}
+library(tidyverse)
+library(shiny)
+library(rsample)
+library(lubridate)
+library(skimr)
+library(GGally)
+library(corrplot)
+library(kknn)
+library(tidymodels)
+```
+
+# The Problem
+
+The company is considering the weather condition to help predict the possibility of precipitations, which involves using various local climatological variables, including temperature, wind speed, humidity, dew point, and pressure. The data you will be handling was collected by a NOAA weather station located at the John F. Kennedy International Airport in Queens, New York.
+
+My task is to provide a high level analysis of weather data in JFK Airport. My stakeholders want to understand the current and historical record of precipitations based on different variables. For now they are mainly interested in a macro-view of JFK Airport Weather, and how it relates to the possibility to rain because it will affect flight delays and etc.
+
+I performed the prescribed data analysis methodologies to analyze the data and to provide resolution to the problem which is indicated below:
+
+-   Data Wrangling
+
+-   Explanatory Data Analysis
+
+-   Prediction Model Development
+
+-   Prediction Model Evaluation
+
+## Data Wrangling
+
+For this section, we are going to do the following steps to make the data ready for analysis
+
+1.  Download NOAA Weather Dataset
+2.  Extract and Read into Project
+3.  Select Subset of Columns
+4.  Clean Up Columns
+5.  Convert Columns to Numerical Types
+6.  Rename Columns
+
+### 1. Download NOAA Weather Dataset
+
+Now lets retrieve first the raw data from the IBM Data Asset Exchange Site.
+
+```{r 1.DownloadFile, message=FALSE, warning=FALSE, include=FALSE}
+# url where the data is located
+url <- "https://dax-cdn.cdn.appdomain.cloud/dax-noaa-weather-data-jfk-airport/1.1.4/noaa-weather-sample-data.tar.gz"
+
+# download the file
+download.file(url, destfile = "noaa-weather-sample-data.tar.gz")
+
+# untar the file so we can get the csv only
+# if you run this on your local machine, then can remove tar = "internal" 
+untar("noaa-weather-sample-data.tar.gz", tar = "internal")
+
+# read_csv only  and store it in a data frame
+raw_weather <- read_csv("noaa-weather-sample-data/jfk_weather_sample.csv")
+```
+
+### 2. Extract and Read into Project
+
+Then lets check the column types of the fields on the given data set.
+
+**Table 1:** List of values of the JFK Weather Sample
+
+```{r 2.aExtract and Read into Project, echo=FALSE, message=TRUE, warning=TRUE}
+glimpse(raw_weather)
+```
+
+Then lets take a peer of some of the records from the dataset.
+
+**Table 2:** Sample records of the JFK Weather Sample
+
+```{r 2.bExtract and Read into Project, echo=FALSE, message=TRUE, warning=TRUE}
+head(raw_weather)
+```
+
+### 3. Select Subset of Columns
+
+The end goal of this project will be to predict HOURLYprecip (precipitation) using a few other variables. Before you can do this, you first need to preprocess the dataset. Section 3 to section 6 focuses on preprocessing.
+
+The first step in preprocessing is to select a subset of data columns and inspect the column types.
+
+The key columns that we will explore in this project are:
+
+-   HOURLYRelativeHumidity
+
+-   HOURLYDRYBULBTEMPF
+
+-   HOURLYPrecip
+
+-   HOURLYWindSpeed
+
+-   HOURLYStationPressure
+
+Data Glossary:
+
+-   'HOURLYRelativeHumidity' is the relative humidity given to the nearest whole percentage.
+
+-   'HOURLYDRYBULBTEMPF' is the dry-bulb temperature and is commonly used as the standard air temperature reported. It is given here in whole degrees Fahrenheit.
+
+-   'HOURLYPrecip' is the amount of precipitation in inches to hundredths over the past hour. For certain automated stations, precipitation will be reported at sub-hourly intervals (e.g. every 15 or 20 minutes) as an accumulated amount of all precipitation within the preceding hour. A “T” indicates a trace amount of precipitation.
+
+-   'HOURLYWindSpeed' is the speed of the wind at the time of observation given in miles per hour (mph).
+
+-   'HOURLYStationPressure' is the atmospheric pressure observed at the station during the time of observation. Given in inches of Mercury (in Hg).
+
+**Table 3:** New subset of the JFK Weather Sample
+
+```{r 3. Select Subset of Columns, echo=FALSE, message=TRUE, warning=TRUE}
+sub_weather <- raw_weather %>% 
+  select(
+    HOURLYRelativeHumidity,
+    HOURLYDRYBULBTEMPF,
+    HOURLYPrecip,
+    HOURLYWindSpeed,
+    HOURLYStationPressure
+  )
+
+head(sub_weather)
+```
+
+### 4. Clean Up Columns
+
+From the dataframe preview above, we can see that the column HOURLYPrecip - which is the hourly measure of precipitation levels - contains both NA and T values. T specifies trace amounts of precipitation (meaning essentially no precipitation), while NA means not available, and is used to denote missing values. Additionally, some values also have "s" at the end of them, indicating that the precipitation was snow.
+
+Inspect the unique values present in the column HOURLYPrecip (with unique(dataframe\$column)) to see these values.
+
+**Table 4:** Unique values of HOURLYPrecip field before changes
+
+```{r 4.a Clean Up Columns, echo=FALSE, message=TRUE, warning=TRUE}
+unique(sub_weather$HOURLYPrecip)
+```
+
+Having characters in values (like the "T" and "s" that you see in the unique values) will cause problems when we create a model because values for precipitation should be numerical. So there is a need to fix these values that have characters.
+
+Now, for the column `HOURLYPrecip`:
+
+1.  Replace all the `T` values with "0.0" and
+
+2.  Remove "s" from values like "0.02s".
+
+3.  Replace "NA" to Zero
+
+**Table 5:** Unique values of HOURLYPrecip field after changes
+```{r 4.b Clean Up Columns, echo=FALSE, message=TRUE, warning=TRUE}
+cleaned_weather <- raw_weather %>%
+  mutate(
+    HOURLYPrecip = str_replace_all(HOURLYPrecip, "T", "0.0"),    # Replace "T" with "0.0"
+    HOURLYPrecip = str_remove(HOURLYPrecip, "s$"),                # Remove "s" from end of values
+    HOURLYPrecip = ifelse(is.na(HOURLYPrecip), "0.0", HOURLYPrecip) # Replace NA with "0"
+  )
+unique(cleaned_weather$HOURLYPrecip)
+```
+
+### 5. Convert Columns to Numerical Types
+
+Now that we have removed the characters in the HOURLYPrecip column, we can safely convert the column to a numeric type.
+
+First, check the types of the columns. We will notice that all are dbl (double or numeric) except for HOURLYPrecip, which is chr (character or string). Lets convert HOURLYPrecip to the numeric type and store the cleaned dataframe as a new variable.
+
+**Table 6:** List of values of the JFK Weather Sample after updates
+```{r 5. Convert Columns to Numerical Types, echo=FALSE, message=TRUE, warning=TRUE}
+cleaned_weather <- cleaned_weather %>%
+  mutate(HOURLYPrecip = as.numeric(HOURLYPrecip))
+glimpse(cleaned_weather)
+```
+
+### 6. Rename Columns
+
+Let's rename the following columns as:
+
+'HOURLYRelativeHumidity' to 'relative_humidity'
+'HOURLYDRYBULBTEMPF' to 'dry_bulb_temp_f'
+'HOURLYPrecip' to 'precip'
+'HOURLYWindSpeed' to 'wind_speed'
+'HOURLYStationPressure' to 'station_pressure'
+
+**Table 7:** Dataset after Data Wrangling
+```{r 6. Rename Columns, echo=FALSE, message=TRUE, warning=TRUE}
+cleaned_weather <- cleaned_weather %>%
+  rename(
+    relative_humidity = HOURLYRelativeHumidity,
+    dry_bulb_temp_f = HOURLYDRYBULBTEMPF,
+    precip = HOURLYPrecip,
+    wind_speed = HOURLYWindSpeed,
+    station_pressure = HOURLYStationPressure
+  )
+cleaned_weather <- cleaned_weather %>% 
+  mutate(DATE = as.POSIXct(DATE))
+cleaned_weather <- cleaned_weather %>% drop_na()
+glimpse(cleaned_weather)
+```
+
+## Explanatory Data Analysis
+
+For this section, we are going to do the following steps to make the data ready for analysis
+
+For this section, we are going to do the following steps to analyze the data before performing data modelling.
+
+1.  Training and Testing Data
+2.  Analyzing Individual Feature Patterns using Visualization
+3.  Descriptive Statistical Analysis
+4.  Basics of Grouping
+5.  Correlation and Causation
+
+### 1. Training and Testing Data
+
+An important step in testing your model is to split the data into training and testing data. The training data will be used to train (fit) models, while the testing data will not be touched until we are evaluating the model. The airline dataset is now divided into 25:75. This means that the proportion of data that is split into the training data is 75% (so the testing data is 25%).
+
+```{r 1. Training and Testing Data, echo=FALSE, message=TRUE, warning=TRUE}
+set.seed(1234)
+weather_split <- initial_split(cleaned_weather)
+train_data <- training(weather_split)
+test_data <- testing(weather_split)
+```
+
+### 2.  Analyzing Individual Feature Patterns using Visualization
+
+To analyze the data, lets prepare a boxplot to visualize numeric (or quantitative) data, since you can visualize the various distributions of the data.
+
+**Table 8:** Detailed information about the 
+```{r 2.a  Analyzing Individual Feature Patterns using Visualization, echo=FALSE, message=TRUE, warning=TRUE}
+skim(train_data)
+```
+
+**Image 1:** Box plot illustration for distribution of data
+
+```{r 2.b  Analyzing Individual Feature Patterns using Visualization, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+train_data_long <- train_data %>%
+  pivot_longer(cols = -DATE, names_to = "variable", values_to = "value")
+
+ggplot(train_data_long, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  labs(x = "Variable",
+       y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The above plot tells the distribution of each variable per date. In order for us to build a model, we have to check the relationship of the variables we are going to use. 
+
+**Image 2:** Series of Scatter Plots visualizing correlation between precip and other variables
+```{r 2.c  Analyzing Individual Feature Patterns using Visualization, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE}
+# Define a function to create scatter plots and calculate correlations
+plot_and_correlate <- function(data, y_var, x_var = "precip") {
+  # Scatter plot with regression line
+  p <- ggplot(data, aes_string(x = x_var, y = y_var)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    labs(title = paste("Scatter Plot of", x_var, "vs", y_var),
+         x = x_var,
+         y = y_var) +
+    theme_minimal()
+  print(p)
+  
+  # Calculate and print correlation
+  cor_value <- cor(data[[x_var]], data[[y_var]], use = "complete.obs")
+  cat("Correlation between", x_var, "and", y_var, ":", cor_value, "\n")
+}
+
+# List of variables to check against precip
+variables <- c("relative_humidity", "dry_bulb_temp_f", "wind_speed", "station_pressure")
+
+# Apply the function to each variable
+for (var in variables) {
+  plot_and_correlate(train_data, var)
+}
+```
+
+### 3. Descriptive Statistical Analysis
+
+Here is the descriptive statistical analysis which helps to describe basic features of our dataset and generates a short summary about the sample and measures of the weather data.
+
+**Table 9:** tatistical data summary of the Weather data
+```{r 3. Descriptive Statistical Analysis, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate correlation coefficients
+correlation <- cor(train_data[c("relative_humidity", "dry_bulb_temp_f", "wind_speed", "station_pressure", "precip")], use = "complete.obs")
+
+# Extract correlation coefficients for precip
+precip_correlation <- correlation["precip", 1:4]
+
+summary_train <- train_data %>%
+  summarise(
+    mean_relative_humidity = mean(relative_humidity, na.rm = TRUE),
+    std_dev_relative_humidity = sd(relative_humidity, na.rm = TRUE),
+    min_relative_humidity = min(relative_humidity, na.rm = TRUE),
+    median_relative_humidity = median(relative_humidity, na.rm = TRUE),
+    max_relative_humidity = max(relative_humidity, na.rm = TRUE),
+    mean_dry_bulb_temp_f = mean(dry_bulb_temp_f, na.rm = TRUE),
+    std_dev_dry_bulb_temp_f = sd(dry_bulb_temp_f, na.rm = TRUE),
+    min_dry_bulb_temp_f = min(dry_bulb_temp_f, na.rm = TRUE),
+    median_dry_bulb_temp_f = median(dry_bulb_temp_f, na.rm = TRUE),
+    max_dry_bulb_temp_f = max(dry_bulb_temp_f, na.rm = TRUE),
+    mean_wind_speed = mean(wind_speed, na.rm = TRUE),
+    std_dev_wind_speed = sd(wind_speed, na.rm = TRUE),
+    min_wind_speed = min(wind_speed, na.rm = TRUE),
+    median_wind_speed = median(wind_speed, na.rm = TRUE),
+    max_wind_speed = max(wind_speed, na.rm = TRUE),
+    mean_station_pressure = mean(station_pressure, na.rm = TRUE),
+    std_dev_station_pressure = sd(station_pressure, na.rm = TRUE),
+    min_station_pressure = min(station_pressure, na.rm = TRUE),
+    median_station_pressure = median(station_pressure, na.rm = TRUE),
+    max_station_pressure = max(station_pressure, na.rm = TRUE)
+  )
+
+# Bind correlation coefficients to the summary table
+summary_train <- cbind(summary_train, precip_correlation)
+
+# Rename the columns to match the format of summary_airline_delays
+names(summary_train)[6:9] <- c("mean_precip", "std_dev_precip", "min_precip", "median_precip")
+
+# Print the summary table
+print(summary_train)
+```
+
+### 4. Basics of Grouping
+
+Is there any relationship between the date and precip variable? For this section, lets prepare a heatmap to further illustrate the relationship of the years and precip.
+
+**Image 3:** Heatmap for precip
+```{r 4. Basics of Grouping, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+train_data$Year <- lubridate::year(train_data$DATE)
+
+# Aggregate the precip data over the year
+agg_data <- train_data %>%
+  group_by(Year) %>%
+  summarise(total_precip = sum(precip, na.rm = TRUE))
+
+# Plot the heatmap
+heatmap <- ggplot(agg_data, aes(x = Year, y = total_precip, fill = total_precip)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Year", y = "Total Precipitation") +
+  theme_minimal()
+
+# Print the heatmap
+print(heatmap)
+```
+
+Given the data, there are years that have higher mean of precip value.
+
+### 5. Correlation
+
+Correlation is a measure of the extent of interdependence between variables. 
+
+**Image 4:** Correlation Map of all related fields to precip
+```{r 5. Correlation, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+# Calculate correlation coefficients
+correlation <- cor(train_data[c("relative_humidity", "dry_bulb_temp_f", "precip", "wind_speed", "station_pressure")], use = "complete.obs")
+
+# Create the correlation plot with correlation values
+corrplot(correlation, method = "number", type = "upper", order = "hclust", tl.cex = 0.7)
+```
+
+### Conclusion
+
+Based on the procedures I performed, the variables that are important to take into account when predicting the precipitation (*precip*) are the following:
+
+Continuous numerical variables: *relative_humidity, dry_bulb_temp_f*
+
+## Prediction Model Development
+
+For this situation, we are going to use KNN Machine Learning Model. The k-Nearest Neighbors (k-NN) algorithm is a simple, yet powerful machine learning model commonly used for both classification and regression tasks.
+
+**Table 10:** KNN Model result specification
+```{r 1.a Predictive Model, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+
+# Preprocess the data: handle missing values and scale the features
+weather_recipe <- recipe(precip ~ relative_humidity + dry_bulb_temp_f, data = train_data) %>%
+  step_impute_median(all_predictors(), -all_outcomes()) %>%
+  step_normalize(all_predictors(), -all_outcomes())
+
+# Prepare the data using the recipe
+prepped_recipe <- prep(weather_recipe)
+train_data_prepped <- bake(prepped_recipe, new_data = train_data)
+test_data_prepped <- bake(prepped_recipe, new_data = test_data)
+
+# Define the k-NN model
+knn_spec <- nearest_neighbor(neighbors = 3) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# Train the k-NN model
+knn_fit <- fit(knn_spec, precip ~ relative_humidity + dry_bulb_temp_f, data = train_data_prepped)
+
+# Print the evaluation metrics
+print(summary(knn_fit))
+```
+
+**Image 5:** KNN specification plot
+```{r 1.b Predictive Model, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+test_predictions <- predict(knn_fit, new_data = test_data_prepped)$.pred
+
+# Combine the actual and predicted values
+results <- data.frame(
+  Actual = test_data_prepped$precip,
+  Predicted = test_predictions
+)
+ggplot(results, aes(x = Actual, y = Predicted)) +
+  geom_point(color = "blue") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(x = "Actual Precipitation",
+       y = "Predicted Precipitation") +
+  theme_minimal()
+```
+
+## Prediction Model Evaluation
+
+Regularization is a way to handle the problem of overfitting. It is a technique you can use to reduce the complexity of the model by adding a penalty on the different parameters of the model. But Regularization doesn't fit kNN model so I used weighted k-NN model or implementing a custom regularization approach.
+
+**Table 11:** Weighted KNN Model result specification
+```{r 1.a Prediction Model Evaluatio, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+
+# Preprocess the data: handle missing values, scale the features, and add polynomial terms
+weather_recipe <- recipe(precip ~ relative_humidity + dry_bulb_temp_f, data = train_data) %>%
+  step_impute_median(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  step_poly(relative_humidity, dry_bulb_temp_f, degree = 2)
+
+# Prepare the data using the recipe
+prepped_recipe <- prep(weather_recipe)
+train_data_prepped <- bake(prepped_recipe, new_data = train_data)
+test_data_prepped <- bake(prepped_recipe, new_data = test_data)
+
+# Define the k-NN model
+knn_spec <- nearest_neighbor(neighbors = 3) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# Train the k-NN model
+knn_fit <- fit(knn_spec, precip ~ ., data = train_data_prepped)
+
+# Make predictions on the test set
+test_predictions <- predict(knn_fit, new_data = test_data_prepped) %>%
+  bind_cols(test_data_prepped %>% select(precip))
+
+# Evaluate the model
+metrics <- yardstick::metrics(test_predictions, truth = precip, estimate = .pred)
+
+# Print the evaluation metrics
+print(metrics)
+```
+
+**Image 6:** weighted KNN specification plot
+```{r 1.b Predictive Model Evaluation, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+test_predictions <- predict(knn_fit, new_data = test_data_prepped)$.pred
+
+# Combine the actual and predicted values
+results <- data.frame(
+  Actual = test_data_prepped$precip,
+  Predicted = test_predictions
+)
+ggplot(results, aes(x = Actual, y = Predicted)) +
+  geom_point(color = "blue") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(x = "Actual Precipitation",
+       y = "Predicted Precipitation") +
+  theme_minimal()
+```
+
+## Prediction
+
+With the given model, it predicts the amount of precipitation based on the dry bulb temperature and relative humidity value.
+
+**Image 6:** Scatterplot showing predicted value of precipitation
+```{r 1.a Prediction, echo=FALSE, fig.align='center', message=TRUE, warning=TRUE}
+# Extract predicted precipitation values from test_predictions
+predicted_precip <- test_predictions
+
+# Combine the predicted precipitation with polynomial features
+results <- bind_cols(test_data_prepped, .pred = test_predictions)
+
+ggplot(results, aes(x = relative_humidity_poly_1, y = dry_bulb_temp_f_poly_1, color = .pred)) +
+  geom_point() +
+  labs(x = "Relative Humidity",
+       y = "Dry Bulb Temperature",
+       color = "Predicted Precipitation") +
+  theme_minimal() +
+  scale_color_viridis_c()  # Use a color scale for the predicted precipitation values
+```
